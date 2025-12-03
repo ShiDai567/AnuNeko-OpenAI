@@ -1,0 +1,23 @@
+# AnuNeko API Python 封装所需依赖
+
+# 用于异步 HTTP 请求
+httpx>=0.24.0
+
+# Flask Web 框架
+Flask>=2.3.0
+
+# Flask-CORS 用于跨域支持
+Flask-CORS>=4.0.0
+
+# 可选：用于更好的 JSON 处理
+ujson>=4.0.0
+
+# 可选：用于更好的类型提示
+typing-extensions>=3.10.0
+
+# 开发依赖（可选）
+# pytest>=6.0.0
+# pytest-asyncio>=0.21.0
+# pytest-cov>=2.12.0
+# black>=21.0.0
+# flake8>=3.9.0
