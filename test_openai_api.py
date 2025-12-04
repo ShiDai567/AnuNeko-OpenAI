@@ -40,13 +40,13 @@ def test_models_list():
         print(f"❌ 模型列表获取失败: {response.status_code} - {response.text}")
         return False
 
-def test_chat_completion():
+def test_chat_completion_with_orange_cat():
     """测试聊天完成端点"""
-    print("\n测试聊天完成端点...")
+    print("\n测试 Orange Cat 模型聊天完成端点...")
     
     # 测试数据
     payload = {
-        "model": "gpt-3.5-turbo",
+        "model": "mihoyo-orange_cat",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "你好，请介绍一下你自己"}
@@ -63,18 +63,48 @@ def test_chat_completion():
     
     if response.status_code == 200:
         data = response.json()
-        print("✅ 聊天完成成功:")
+        print("✅ Orange Cat聊天完成成功:")
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         print(f"  模型: {data.get('model')}")
         print(f"  回复: {content[:100]}..." if len(content) > 100 else f"  回复: {content}")
         return True
     else:
-        print(f"❌ 聊天完成失败: {response.status_code} - {response.text}")
+        print(f"❌ Orange Cat聊天完成失败: {response.status_code} - {response.text}")
+        return False
+
+def test_chat_completion_with_exotic_shorthair():
+    """测试使用 Exotic Shorthair 模型的聊天完成端点"""
+    print("\n测试 Exotic Shorthair 模型聊天完成端点...")
+    
+    # 测试数据
+    payload = {
+        "model": "mihoyo-exotic_shorthair",
+        "messages": [
+            {"role": "user", "content": "现在你是黑猫模型吗？"}
+        ],
+        "temperature": 0.7
+    }
+    
+    response = requests.post(
+        f"{BASE_URL}/v1/chat/completions",
+        headers={"Content-Type": "application/json"},
+        json=payload
+    )
+    
+    if response.status_code == 200:
+        data = response.json()
+        print("✅ Exotic Shorthair 聊天完成成功:")
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        print(f"  模型: {data.get('model')}")
+        print(f"  回复: {content[:100]}..." if len(content) > 100 else f"  回复: {content}")
+        return True
+    else:
+        print(f"❌ Exotic Shorthair 聊天完成失败: {response.status_code} - {response.text}")
         return False
 
 def test_chat_completion_with_gpt4():
-    """测试使用 GPT-4 模型的聊天完成端点"""
-    print("\n测试 GPT-4 模型聊天完成端点...")
+    """测试使用 非内部 模型的聊天完成端点"""
+    print("\n测试 非内部 模型聊天完成端点...")
     
     # 测试数据
     payload = {
@@ -108,7 +138,7 @@ def test_streaming_chat_completion():
     
     # 测试数据
     payload = {
-        "model": "gpt-3.5-turbo",
+        "model": "mihoyo-orange_cat",
         "messages": [
             {"role": "user", "content": "请用流式回复介绍一下你自己"}
         ],
@@ -184,7 +214,7 @@ def test_openai_client():
         
         # 测试聊天完成
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="mihoyo-orange_cat",
             messages=[
                 {"role": "user", "content": "你好，使用 OpenAI 客户端库测试"}
             ],
@@ -212,7 +242,8 @@ def main():
     tests = [
         test_health_check,
         test_models_list,
-        test_chat_completion,
+        test_chat_completion_with_orange_cat,
+        test_chat_completion_with_exotic_shorthair,
         test_chat_completion_with_gpt4,
         test_streaming_chat_completion,
         test_sessions,

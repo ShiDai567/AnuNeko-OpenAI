@@ -29,13 +29,44 @@ CORS(app)
 sessions: Dict[str, Dict[str, Any]] = {}
 anuneko_api: Optional[AnuNekoAPI] = None
 
-# 模型映射
-# MODEL_MAPPING = {
-#     "gpt-3.5-turbo": "Orange Cat",
-#     "gpt-4": "Exotic Shorthair",
-#     "gpt-4-turbo": "Exotic Shorthair",
-#     "gpt-4o": "Exotic Shorthair"
-# }
+# 动态模型映射表
+MODEL_MAPPING: Dict[str, str] = {}
+
+def update_model_mapping():
+    """动态更新模型映射表"""
+    global MODEL_MAPPING
+    try:
+        api = get_anuneko_api()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            anuneko_models = loop.run_until_complete(api.model_view())
+        finally:
+            loop.close()
+        
+        if anuneko_models and "models" in anuneko_models:
+            # 清空现有映射
+            MODEL_MAPPING.clear()
+            
+            # 为每个AnuNeko模型创建映射
+            for anuneko_model in anuneko_models["models"]:
+                # 生成模型ID
+                openai_model = f"mihoyo-{anuneko_model.lower().replace(' ', '_')}"
+                MODEL_MAPPING[openai_model] = anuneko_model
+            
+            print(f"已更新模型映射表，共{len(MODEL_MAPPING)}个模型")
+        else:
+            # 如果无法获取，设置默认映射
+            MODEL_MAPPING.clear()
+            MODEL_MAPPING["mihoyo-orange_cat"] = "Orange Cat"
+            print("无法获取AnuNeko模型，使用默认映射")
+            
+    except Exception as e:
+        print(f"更新模型映射失败: {str(e)}")
+        # 设置默认映射作为后备
+        MODEL_MAPPING.clear()
+        MODEL_MAPPING["mihoyo-orange_cat"] = "Orange Cat"
 
 def get_anuneko_api() -> AnuNekoAPI:
     """获取 AnuNeko API 实例"""
@@ -46,8 +77,19 @@ def get_anuneko_api() -> AnuNekoAPI:
 
 def get_session_for_request(request_data: Dict[str, Any]) -> str:
     """根据请求获取或创建会话"""
-    model = request_data.get("model", "gpt-3.5-turbo")
-    anuneko_model = MODEL_MAPPING.get(model, "Orange Cat")
+    model = request_data.get("model", "mihoyo-orange_cat")
+    
+    # 确保模型映射是最新的
+    if not MODEL_MAPPING:
+        update_model_mapping()
+    
+    # 从动态映射表中获取AnuNeko模型名
+    anuneko_model = MODEL_MAPPING.get(model)
+    
+    if not anuneko_model:
+        # 如果映射中没有，默认使用Orange Cat
+        print("未找到模型映射，使用默认模型：Orange Cat")
+        anuneko_model = "Orange Cat"
     
     # 尝试从请求中获取会话ID（如果有的话）
     session_id = request_data.get("session_id")
@@ -166,18 +208,15 @@ def list_models():
         
         # 如果成功获取到AnuNeko模型，使用真实数据
         if anuneko_models and "models" in anuneko_models:
+            # 更新模型映射表
+            MODEL_MAPPING.clear()
+            
             # 为每个AnuNeko模型创建对应的OpenAI模型条目
             for anuneko_model in anuneko_models["models"]:
-                # 根据AnuNeko模型名称映射到OpenAI模型名称
-                # if "Orange" in anuneko_model:
-                #     openai_model = "gpt-3.5-turbo"
-                # elif "Exotic" in anuneko_model or "Shorthair" in anuneko_model:
-                #     openai_model = "gpt-4"
-                # else:
-                #     # 默认映射
-                #     openai_model = "gpt-3.5-turbo"
-                print(anuneko_model)
+                # 生成模型ID
                 openai_model = f"mihoyo-{anuneko_model.lower().replace(' ', '_')}"
+                MODEL_MAPPING[openai_model] = anuneko_model
+                
                 models.append({
                     "id": openai_model,
                     "object": "model",
@@ -189,20 +228,24 @@ def list_models():
                     "anuneko_model": anuneko_model,
                     "anuneko_model_id": anuneko_models["models"].index(anuneko_model)
                 })
+            
+            print(f"已更新模型映射表，共{len(MODEL_MAPPING)}个模型")
         else:
-            # 如果无法获取真实模型，使用静态映射作为后备
-            # for openai_model, anuneko_model in MODEL_MAPPING.items():
-            #     models.append({
-            #         "id": openai_model,
-            #         "object": "model",
-            #         "created": int(time.time()),
-            #         "owned_by": "anuneko",
-            #         "permission": [],
-            #         "root": openai_model,
-            #         "parent": None,
-            #         "anuneko_model": anuneko_model,
-            #         "note": "static_mapping"
-            #     })
+            # 如果无法获取真实模型，使用默认映射
+            MODEL_MAPPING.clear()
+            MODEL_MAPPING["mihoyo-orange_cat"] = "Orange Cat"
+            
+            models.append({
+                "id": "mihoyo-orange_cat",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "anuneko",
+                "permission": [],
+                "root": "mihoyo-orange_cat",
+                "parent": None,
+                "anuneko_model": "Orange Cat",
+                "note": "default_model"
+            })
         return jsonify({
             "object": "list",
             "data": models,
@@ -210,25 +253,26 @@ def list_models():
         })
     
     except Exception as e:
-        # 如果出错，返回静态映射作为后备
-        models = []
-        for openai_model, anuneko_model in MODEL_MAPPING.items():
-            models.append({
-                "id": openai_model,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "anuneko",
-                "permission": [],
-                "root": openai_model,
-                "parent": None,
-                "anuneko_model": anuneko_model,
-                "note": "fallback_static_mapping"
-            })
+        # 如果出错，设置默认映射作为后备
+        MODEL_MAPPING.clear()
+        MODEL_MAPPING["mihoyo-orange_cat"] = "Orange Cat"
+        
+        models = [{
+            "id": "mihoyo-orange_cat",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "anuneko",
+            "permission": [],
+            "root": "mihoyo-orange_cat",
+            "parent": None,
+            "anuneko_model": "Orange Cat",
+            "note": "fallback_default_model"
+        }]
         
         return jsonify({
             "object": "list",
             "data": models,
-            "error": f"无法获取AnuNeko模型列表，使用静态映射: {str(e)}"
+            "error": f"无法获取AnuNeko模型列表，使用默认模型: {str(e)}"
         })
 
 @app.route("/sessions", methods=["GET"])
