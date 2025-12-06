@@ -8,7 +8,8 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 # 导入路由
-from app.main.routes import health_bp
+from app.main.routes import health_bp, sessions_dp
+from app.api.routes import api_bp
 
 # 加载环境变量
 load_dotenv()
@@ -26,7 +27,7 @@ if not os.path.exists(log_path):
 
 # 配置文件处理器
 file_handler = RotatingFileHandler(
-    f'{log_path}/{log_name}',
+    f'{log_path}/{log_name}.log',
     maxBytes=10240000,  # 10MB
     backupCount=10
 )
@@ -48,6 +49,16 @@ app.logger.setLevel(logging.INFO)
 app.register_blueprint(
     blueprint=health_bp,
     url_prefix="/health"
+)
+
+app.register_blueprint(
+    blueprint=sessions_dp,
+    url_prefix="/sessions"
+)
+
+app.register_blueprint(
+    blueprint=api_bp,
+    url_prefix="/api"
 )
 
 @app.errorhandler(404)
