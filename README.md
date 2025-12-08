@@ -19,6 +19,8 @@
 - 🔄 **会话管理**: 自动管理和维护与 AnuNeko 的会话
 - 📊 **动态模型映射**: 自动获取并映射可用的 AnuNeko 模型
 - 🔧 **易于集成**: 只需更改 base_url 即可将现有 OpenAI 应用切换到 AnuNeko
+- 📝 **日志记录**: 支持日志轮转和详细记录
+- 🏗️ **模块化架构**: 采用 Flask 蓝图实现模块化设计
 
 ## 快速开始
 
@@ -44,6 +46,15 @@ ANUNEKO_TOKEN=your_token_here
 
 # 你的 AnuNeko Cookie (可选)
 ANUNEKO_COOKIE=your_cookie_here
+
+# 服务器配置 (可选)
+FLASK_HOST=0.0.0.0
+FLASK_PORT=8000
+FLASK_DEBUG=False
+
+# 日志配置 (可选)
+LOG_PATH=logs
+LOG_NAME=anuneko-openai
 ```
 
 ### 启动服务器
@@ -143,12 +154,17 @@ for chunk in stream:
 - `stream`: 是否使用流式响应 (默认: false)
 - `temperature`: 温度参数 (0.0-2.0)
 - `max_tokens`: 最大令牌数
+- `session_id`: 指定要使用的会话ID (可选)
 
 ### 模型列表
 
 `GET /v1/models`
 
 返回所有可用的模型列表。
+
+`GET /v1/models/<model_name>`
+
+返回指定模型的详细信息。
 
 ### 会话管理
 
@@ -184,18 +200,15 @@ for chunk in stream:
 python test_openai_api.py
 ```
 
-### 运行 AnuNeko API 测试
-
-```bash
-python test/test_anuneko_api.py
-```
-
 ### 使用示例代码
 
-查看 `test/` 目录中的示例文件：
-
-- `test/example_usage.py`: AnuNeko API 直接使用示例
-- `test/openai_example.py`: OpenAI 兼容 API 使用示例
+查看项目根目录中的 `test_openai_api.py` 文件，包含各种测试用例：
+- 健康检查测试
+- 模型列表测试
+- 聊天完成测试（多种模型）
+- 流式响应测试
+- 会话管理测试
+- OpenAI 客户端库测试
 
 ## 高级配置
 
@@ -211,17 +224,24 @@ FLASK_DEBUG=False
 
 # API 配置
 API_BASE_URL=http://localhost:8000
+
+# 日志配置
+LOG_PATH=logs
+LOG_NAME=anuneko-openai
 ```
+
+### 日志配置
+
+服务器支持自动日志轮转，默认配置：
+- 日志文件大小限制：10MB
+- 备份文件数量：10个
+- 日志格式：`[时间戳] [级别] 消息内容 [在 文件名:行号]`
+
+日志文件保存在 `logs/` 目录下，文件名格式为 `anuneko-openai.log`。
 
 ### 自定义模型映射
 
-您可以通过修改 `app.py` 中的 `MODEL_MAPPING` 字典来自定义模型映射：
-
-```python
-MODEL_MAPPING = {
-    "custom-model-name": "AnuNeko 模型名称"
-}
-```
+服务器会自动从 AnuNeko API 获取可用模型列表并生成映射。如果需要自定义映射，可以修改 `app/services/session_service.py` 中的 `update_model_mapping` 方法。
 
 ## 故障排除
 
@@ -240,6 +260,10 @@ MODEL_MAPPING = {
    - 服务器将自动使用默认模型 (Orange Cat)
    - 检查 AnuNeko API 是否可访问
 
+4. **日志文件无法创建**
+   - 确保 `LOG_PATH` 目录存在且有写入权限
+   - 检查磁盘空间是否充足
+
 ### 调试模式
 
 启用调试模式以获取更详细的日志：
@@ -254,23 +278,69 @@ FLASK_DEBUG=True python app.py
 
 ```
 anuneko-openai/
-├── app.py                 # Flask 服务器主文件
-├── anuneko_api.py         # AnuNeko API 封装
-├── requirements.txt       # 项目依赖
-├── .env.example          # 环境变量示例
-├── test_openai_api.py    # OpenAI API 兼容性测试
-└── test/                 # 测试和示例文件
-    ├── example_usage.py
-    ├── openai_example.py
-    └── test_anuneko_api.py
+├── app.py                        # Flask 服务器主文件
+├── requirements.txt              # 项目依赖
+├── .env.example                 # 环境变量示例
+├── test_openai_api.py           # OpenAI API 兼容性测试
+├── app/                         # 应用主目录
+│   ├── __init__.py
+│   ├── api/                     # API 路由
+│   │   └── v1/                  # API v1 版本
+│   │       ├── routes.py        # API v1 路由入口
+│   │       ├── chat/            # 聊天相关 API
+│   │       │   └── routes.py
+│   │       └── models/          # 模型相关 API
+│   │           ├── routes.py
+│   │           └── models.py
+│   ├── main/                    # 主要功能路由
+│   │   ├── routes.py
+│   │   ├── health.py
+│   │   └── sessions.py
+│   └── services/                # 业务逻辑服务
+│       ├── anuneko_service.py   # AnuNeko API 封装
+│       ├── chat_service.py      # 聊天服务
+│       └── session_service.py   # 会话管理服务
+├── docs/                        # 文档目录
+│   ├── gitlab-mirror-setup.md
+│   └── openai-api-documentation.md
+└── scripts/                     # 脚本目录
+    └── validate-workflow.sh
 ```
 
+### 架构设计
+
+项目采用模块化架构，主要组件包括：
+
+1. **Flask 应用主入口** (`app.py`)
+   - 应用初始化和配置
+   - 蓝图注册
+   - 日志配置
+   - 错误处理
+
+2. **API 路由层** (`app/api/`)
+   - 使用 Flask 蓝图组织路由
+   - 按版本和功能模块划分
+   - 处理 HTTP 请求和响应
+
+3. **服务层** (`app/services/`)
+   - 业务逻辑实现
+   - 外部 API 调用封装
+   - 会话管理
+   - 数据处理和转换
+
+4. **主功能路由** (`app/main/`)
+   - 健康检查
+   - 会话管理
+   - 其他主要功能
+
 ### 未来计划
-- 重构模块化代码[进行中]
-- 添加更多模型映射
-- 添加更多 API 端点
-- 添加更多测试用例
-- 打包 Docker 镜像
+- [x] 重构模块化代码
+- [ ] 添加更多模型映射
+- [ ] 添加更多 API 端点
+- [ ] 添加更多测试用例
+- [ ] 打包 Docker 镜像
+- [ ] 实现会话持久化
+- [ ] 添加性能监控
 
 ### 贡献
 
@@ -285,3 +355,4 @@ anuneko-openai/
 - [AnuNeko](https://anuneko.com/) - 提供优秀的 AI 模型服务
 - [OpenAI](https://openai.com/) - API 规范设计
 - [Flask](https://flask.palletsprojects.com/) - Web 框架
+- [二叉树树](https://2x.nz/posts/anuneko/) - 逆向工程参考
