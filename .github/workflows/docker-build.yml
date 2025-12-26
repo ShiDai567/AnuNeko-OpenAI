@@ -13,11 +13,17 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # 构建和推送镜像
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major_version: ${{ steps.version.outputs.major_version }}
+      minor_version: ${{ steps.version.outputs.minor_version }}
+      image_digest: ${{ steps.build.outputs.digest }}
 
     steps:
     - name: Checkout repository
@@ -90,6 +96,7 @@ jobs:
         fi
 
     - name: Build and push Docker image
+      id: build
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -98,68 +105,47 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
 
+  # 生成SBOM
+  sbom:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
     - name: Generate SBOM
       uses: anchore/sbom-action@v0
-      if: github.event_name != 'pull_request'
       with:
-        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image_digest }}
         format: spdx-json
         output-file: sbom.spdx.json
       continue-on-error: true
 
     - name: Upload SBOM
       uses: actions/upload-artifact@v4
-      if: github.event_name != 'pull_request'
       with:
         name: sbom
         path: sbom.spdx.json
       continue-on-error: true
 
-    - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
-      uses: softprops/action-gh-release@v1
+  # 创建Release
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
       with:
-        name: Release ${{ steps.version.outputs.version }}
-        body: |
-          ## AnuNeko OpenAI API 兼容服务器 ${{ steps.version.outputs.version }}
-          
-          ### 镜像信息
-          - **完整版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}`
-          - **主版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.major_version }}`
-          - **次版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.minor_version }}`
-          - **最新标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest`
-          
-          ### 使用方法
-          ```bash
-          # 拉取特定版本
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          
-          # 拉取最新版本
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          
-          # 运行容器
-          docker run -d -p 8000:8000 \
-            -e ANUNEKO_TOKEN=your_token_here \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          ```
-          
-          ### 变更日志
-          ${{ steps.changelog.outputs.changelog }}
-          
-          ### 系统要求
-          - Docker 20.10+
-          - 内存: 最少 128MB
-          - 存储: 最少 100MB
-        files: |
-          sbom.spdx.json
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
 
     - name: Generate changelog
       id: changelog
-      if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
       run: |
         # 获取上一个标签
         PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
@@ -179,3 +165,50 @@ jobs:
           echo "" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
         fi
+
+    - name: Download SBOM
+      uses: actions/download-artifact@v4
+      with:
+        name: sbom
+        path: ./
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ needs.build.outputs.version }}
+        body: |
+          ## AnuNeko OpenAI API 兼容服务器 ${{ needs.build.outputs.version }}
+          
+          ### 镜像信息
+          - **完整版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}`
+          - **主版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.major_version }}`
+          - **次版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.minor_version }}`
+          - **最新标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest`
+          
+          ### 使用方法
+          ```bash
+          # 拉取特定版本
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+          
+          # 拉取最新版本
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # 运行容器
+          docker run -d -p 8000:8000 \
+            -e ANUNEKO_TOKEN=your_token_here \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
+          ```
+          
+          ### 变更日志
+          ${{ steps.changelog.outputs.changelog }}
+          
+          ### 系统要求
+          - Docker 20.10+
+          - 内存: 最少 128MB
+          - 存储: 最少 100MB
+        files: |
+          sbom.spdx.json
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
