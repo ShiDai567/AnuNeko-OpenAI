@@ -8,20 +8,31 @@ variables:
 
 .extract_version: &extract_version
   - |
-    # 1. 提取版本
+    # 1. 动态获取当前仓库路径 (例如 shidai/AnuNeko-OpenAI)
+    # 使用内置变量 $CI_PROJECT_PATH，它会跟随你的仓库改名而自动更新
+    RAW_PATH="$CI_PROJECT_PATH"
+    
+    # 2. 格式化处理
+    # 虽然你希望保留大小写，但为了保险起见，我们将主机名部分保持原样，
+    # 路径部分引用变量。注意：如果 Docker Push 报错 404，
+    # 通常是因为 Registry 不接受大写，届时建议将下行改为全小写转换。
+    TARGET_IMAGE="$CI_REGISTRY/$RAW_PATH"
+    
+    # 3. 提取版本号
     if [ "$CI_COMMIT_TAG" ]; then
       VERSION=${CI_COMMIT_TAG#v}
     else
       VERSION=$CI_COMMIT_SHORT_SHA
     fi
+
+    # 4. 写入环境变量文件供后续阶段使用
     echo "VERSION=$VERSION" > version.env
+    echo "IMAGE_NAME=$TARGET_IMAGE" >> version.env
     
-    # 2. 强制将路径转为全小写 (解决 404 的关键)
-    # 例如：ShiDai/AnuNeko -> shidai/anuneko
-    LOWER_IMAGE_NAME=$(echo "$CI_REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]')
-    echo "IMAGE_NAME=$LOWER_IMAGE_NAME" >> version.env
-    
-    echo "确定推送路径: $LOWER_IMAGE_NAME"
+    echo "--- 自动识别配置 ---"
+    echo "当前仓库变量路径: $RAW_PATH"
+    echo "最终镜像完整路径: $TARGET_IMAGE"
+    echo "当前版本号: $VERSION"
 
 build_image:
   stage: build
@@ -29,19 +40,18 @@ build_image:
   services:
     - docker:24.0.5-dind
   before_script:
-    # 使用 CI 自动生成的令牌登录
-    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - *extract_version
     - source version.env
   script:
     - |
-      # 此时 $IMAGE_NAME 已经是小写了
-      echo "步骤 1: 构建镜像"
-      docker build -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest -f ./docker/Dockerfile .
+      # 这里的 $IMAGE_NAME 是从 .extract_version 动态生成的
+      echo "正在构建: $IMAGE_NAME:$VERSION"
+      docker build -t "$IMAGE_NAME:$VERSION" -t "$IMAGE_NAME:latest" -f ./docker/Dockerfile .
       
-      echo "步骤 2: 推送镜像"
-      docker push $IMAGE_NAME:$VERSION
-      docker push $IMAGE_NAME:latest
+      echo "正在推送..."
+      docker push "$IMAGE_NAME:$VERSION"
+      docker push "$IMAGE_NAME:latest"
   artifacts:
     reports:
       dotenv: version.env
@@ -61,17 +71,15 @@ create_release:
   script:
     - |
       source version.env
-      if [ -z "$CI_COMMIT_TAG" ]; then echo "非标签，不创建 Release"; exit 0; fi
+      if [ -z "$CI_COMMIT_TAG" ]; then exit 0; fi
       
-      # 生成简易变更日志
       PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-      [ -n "$PREV_TAG" ] && CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD) || CHANGELOG="Initial release"
+      [ -n "$PREV_TAG" ] && CHANGELOG=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG..HEAD") || CHANGELOG="Initial release"
 
-      # 构造 JSON
       JSON_DATA=$(jq -n \
         --arg n "Release $VERSION" \
         --arg t "$CI_COMMIT_TAG" \
-        --arg d "### 快速下载\n\`docker pull $IMAGE_NAME:$VERSION\`\n\n### 变更日志\n$CHANGELOG" \
+        --arg d "### 镜像信息\n- 地址: \`$IMAGE_NAME:$VERSION\`\n\n### 变更日志\n$CHANGELOG" \
         '{name: $n, tag_name: $t, description: $d}')
 
       curl --request POST \
