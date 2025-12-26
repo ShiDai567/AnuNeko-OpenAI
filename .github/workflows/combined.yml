@@ -50,9 +50,11 @@ jobs:
           fi
           echo "正在推送分支: $CURRENT_BRANCH"
           git push gitlab "$CURRENT_BRANCH"
+          
           if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
-            echo "推送所有标签到 GitLab"
-            git push gitlab --tags
+            echo "正在强制同步所有标签到 GitLab..."
+            # 使用 --force 确保标签冲突时直接覆盖 GitLab 上的旧标签
+            git push gitlab --tags --force
           fi
 
       - name: Create GitLab MR
