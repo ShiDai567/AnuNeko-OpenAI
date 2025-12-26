@@ -140,6 +140,79 @@ for chunk in stream:
     if chunk.choices[0].delta.content is not None:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
+        
+## Docker 部署
+
+### 使用预构建镜像
+
+```bash
+# 拉取最新版本
+docker pull ghcr.io/shidai567/anuneko-openai:latest
+
+# 拉取特定版本
+docker pull ghcr.io/shidai567/anuneko-openai:1.0.0
+
+# 运行容器
+docker run -d -p 8000:8000 \
+    -e ANUNEKO_TOKEN=your_token_here \
+    --name anuneko-api \
+    ghcr.io/shidai567/anuneko-openai:latest
+```
+
+### 使用 Docker Compose
+
+```bash
+# 启动服务
+docker-compose -f docker/docker-compose.yml up -d
+
+# 查看日志
+docker-compose -f docker/docker-compose.yml logs -f
+
+# 停止服务
+docker-compose -f docker/docker-compose.yml down
+```
+
+### 构建自定义镜像
+
+```bash
+# 使用提供的脚本
+./scripts/docker-build.sh
+
+# 或手动构建
+docker build -f docker/Dockerfile -t anuneko-openai:latest .
+```
+
+## 自动化镜像管理
+
+本项目实现了完整的自动化镜像管理流程，支持版本化发布和自动清理。
+
+### 功能特性
+
+- **版本提取**：从Git标签自动提取版本号（如v1.0.0 → 1.0.0）
+- **多标签发布**：自动创建版本标签、主版本标签、次版本标签和latest标签
+- **旧镜像清理**：发布新版本前自动删除同版本的旧镜像
+- **自动Release**：创建包含完整信息的Git Release
+
+### 使用方法
+
+1. **创建新版本**：
+    ```bash
+    git tag v1.0.0
+    git push origin v1.0.0
+    ```
+
+2. **镜像标签**：
+    - `ghcr.io/shidai567/anuneko-openai:1.0.0` - 完整版本
+    - `ghcr.io/shidai567/anuneko-openai:1` - 主版本
+    - `ghcr.io/shidai567/anuneko-openai:1.0` - 次版本
+    - `ghcr.io/shidai567/anuneko-openai:latest` - 最新版本
+
+3. **验证流程**：
+    ```bash
+    ./scripts/validate-image-management.sh
+    ```
+
+详细文档请参考：[自动化镜像管理流程](docs/automated-image-management.md)
 
 ## API 端点
 
@@ -301,9 +374,14 @@ anuneko-openai/
 │       ├── chat_service.py      # 聊天服务
 │       └── session_service.py   # 会话管理服务
 ├── docs/                        # 文档目录
+│   ├── automated-image-management.md  # 自动化镜像管理文档
+│   ├── docker-deployment.md           # Docker部署文档
 │   ├── gitlab-mirror-setup.md
 │   └── openai-api-documentation.md
 └── scripts/                     # 脚本目录
+    ├── docker-build.sh              # Docker构建脚本
+    ├── docker-run.sh                # Docker运行脚本
+    ├── validate-image-management.sh  # 镜像管理流程验证脚本
     └── validate-workflow.sh
 ```
 
@@ -339,6 +417,7 @@ anuneko-openai/
 - [ ] 添加更多 API 端点
 - [ ] 添加更多测试用例
 - [x] 打包 Docker 镜像
+- [x] 实现自动化镜像管理流程
 - [ ] 实现会话持久化
 - [ ] 添加性能监控
 

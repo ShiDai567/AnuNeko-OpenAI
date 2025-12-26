@@ -16,12 +16,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整历史记录，用于生成变更日志
 
     - name: Log in to Container Registry
       if: github.event_name != 'pull_request'
@@ -31,6 +33,16 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Extract version from tag
+      id: version
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        # 从标签中提取版本号 (例如 v1.0.0 -> 1.0.0)
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "major_version=$(echo $VERSION | cut -d. -f1)" >> $GITHUB_OUTPUT
+        echo "minor_version=$(echo $VERSION | cut -d. -f1-2)" >> $GITHUB_OUTPUT
+
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
@@ -39,10 +51,43 @@ jobs:
         tags: |
           type=ref,event=branch
           type=ref,event=pr
+          # 如果是标签推送，添加版本标签
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}}
           type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Delete old version image if exists
+      if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+      run: |
+        # 获取当前版本号
+        VERSION="${{ steps.version.outputs.version }}"
+        MAJOR_VERSION="${{ steps.version.outputs.major_version }}"
+        MINOR_VERSION="${{ steps.version.outputs.minor_version }}"
+        
+        # 设置镜像名称
+        FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+        
+        # 删除旧的同版本镜像
+        echo "检查并删除旧的同版本镜像..."
+        
+        # 删除完整版本标签
+        if docker manifest inspect $FULL_IMAGE:$VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $FULL_IMAGE:$VERSION"
+          docker buildx imagetools rm $FULL_IMAGE:$VERSION || true
+        fi
+        
+        # 删除主版本标签
+        if docker manifest inspect $FULL_IMAGE:$MAJOR_VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $FULL_IMAGE:$MAJOR_VERSION"
+          docker buildx imagetools rm $FULL_IMAGE:$MAJOR_VERSION || true
+        fi
+        
+        # 删除次版本标签
+        if docker manifest inspect $FULL_IMAGE:$MINOR_VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $FULL_IMAGE:$MINOR_VERSION"
+          docker buildx imagetools rm $FULL_IMAGE:$MINOR_VERSION || true
+        fi
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -57,7 +102,7 @@ jobs:
       uses: anchore/sbom-action@v0
       if: github.event_name != 'pull_request'
       with:
-        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}
+        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
         format: spdx-json
         output-file: sbom.spdx.json
       continue-on-error: true
@@ -69,3 +114,68 @@ jobs:
         name: sbom
         path: sbom.spdx.json
       continue-on-error: true
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ steps.version.outputs.version }}
+        body: |
+          ## AnuNeko OpenAI API 兼容服务器 ${{ steps.version.outputs.version }}
+          
+          ### 镜像信息
+          - **完整版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}`
+          - **主版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.major_version }}`
+          - **次版本标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.minor_version }}`
+          - **最新标签**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest`
+          
+          ### 使用方法
+          ```bash
+          # 拉取特定版本
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          
+          # 拉取最新版本
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # 运行容器
+          docker run -d -p 8000:8000 \
+            -e ANUNEKO_TOKEN=your_token_here \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          ```
+          
+          ### 变更日志
+          ${{ steps.changelog.outputs.changelog }}
+          
+          ### 系统要求
+          - Docker 20.10+
+          - 内存: 最少 128MB
+          - 存储: 最少 100MB
+        files: |
+          sbom.spdx.json
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Generate changelog
+      id: changelog
+      if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+      run: |
+        # 获取上一个标签
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        if [ -n "$PREV_TAG" ]; then
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "### 自 $PREV_TAG 以来的变更" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        else
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "### 首次发布" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          git log --pretty=format:"- %s (%h)" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        fi

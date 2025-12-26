@@ -5,12 +5,35 @@ stages:
   - build
   - test
   - deploy
+  - release
 
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
+  # 默认使用提交短哈希作为标签
   IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   IMAGE_NAME: $CI_REGISTRY_IMAGE
+
+# 提取版本信息的函数
+.extract_version: &extract_version
+  - |
+    # 如果是标签推送，提取版本号
+    if [ "$CI_COMMIT_TAG" ]; then
+      # 从标签中提取版本号 (例如 v1.0.0 -> 1.0.0)
+      VERSION=${CI_COMMIT_TAG#v}
+      MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+      MINOR_VERSION=$(echo $VERSION | cut -d. -f1-2)
+      
+      echo "VERSION=$VERSION" >> version.env
+      echo "MAJOR_VERSION=$MAJOR_VERSION" >> version.env
+      echo "MINOR_VERSION=$MINOR_VERSION" >> version.env
+      
+      # 更新镜像标签
+      IMAGE_TAG=$VERSION
+      echo "设置版本标签: $IMAGE_TAG"
+    else
+      echo "非标签推送，使用提交哈希: $IMAGE_TAG"
+    fi
 
 # 构建Docker镜像
 build_image:
@@ -20,11 +43,40 @@ build_image:
     - docker:24.0.5-dind
   before_script:
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+    - *extract_version
   script:
-    - docker build -t $IMAGE_NAME:$IMAGE_TAG -f ./docker/Dockerfile .
-    - docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
-    - docker push $IMAGE_NAME:$IMAGE_TAG
-    - docker push $IMAGE_NAME:latest
+    - |
+      # 构建镜像
+      docker build -t $IMAGE_NAME:$IMAGE_TAG -f ./docker/Dockerfile .
+      
+      # 如果是标签推送，添加版本标签
+      if [ "$CI_COMMIT_TAG" ]; then
+        # 添加完整版本标签
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:$VERSION
+        
+        # 添加主版本标签
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:$MAJOR_VERSION
+        
+        # 添加次版本标签
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:$MINOR_VERSION
+        
+        # 添加latest标签
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
+        
+        echo "推送所有标签..."
+        docker push $IMAGE_NAME:$VERSION
+        docker push $IMAGE_NAME:$MAJOR_VERSION
+        docker push $IMAGE_NAME:$MINOR_VERSION
+        docker push $IMAGE_NAME:latest
+      else
+        # 非标签推送，只推送提交哈希标签和latest
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
+        docker push $IMAGE_NAME:$IMAGE_TAG
+        docker push $IMAGE_NAME:latest
+      fi
+  artifacts:
+    reports:
+      dotenv: version.env
   only:
     - main
     - master
@@ -39,38 +91,31 @@ test_image:
   before_script:
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
   script:
-    - docker pull $IMAGE_NAME:$IMAGE_TAG
-    - docker run --rm -d --name test-container -e ANUNEKO_TOKEN=test_token -p 8000:8000 $IMAGE_NAME:$IMAGE_TAG
-    - sleep 10
-    - docker exec test-container curl -f http://localhost:8000/health || exit 1
-    - docker stop test-container
+    - |
+      # 拉取并测试镜像
+      docker pull $IMAGE_NAME:$IMAGE_TAG
+      
+      # 运行健康检查
+      docker run --rm -d --name test-container \
+        -e ANUNEKO_TOKEN=test_token \
+        -p 8000:8000 \
+        $IMAGE_NAME:$IMAGE_TAG
+      
+      # 等待容器启动
+      sleep 10
+      
+      # 执行健康检查
+      docker exec test-container curl -f http://localhost:8000/health || exit 1
+      
+      # 停止容器
+      docker stop test-container
   only:
     - main
     - master
     - tags
 
-# 部署到生产环境
-deploy_production:
-  stage: deploy
-  image: docker:24.0.5
-  services:
-    - docker:24.0.5-dind
-  before_script:
-    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
-  script:
-    - echo "部署到生产环境..."
-    - docker pull $IMAGE_NAME:$IMAGE_TAG
-    - docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:production
-    - docker push $IMAGE_NAME:production
-  environment:
-    name: production
-    url: https://your-production-url.com
-  only:
-    - tags
-  when: manual
-
 # 清理旧镜像
-cleanup:
+cleanup_old_images:
   stage: deploy
   image: docker:24.0.5
   services:
@@ -78,14 +123,108 @@ cleanup:
   before_script:
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
   script:
-    - echo "清理旧镜像..."
     - |
-      # 保留最新的5个镜像，删除其他镜像
-      for tag in $(docker image ls $IMAGE_NAME --format "{{.Tag}}" | tail -n +6); do
+      echo "清理旧镜像..."
+      
+      # 如果是标签推送，先删除同版本的旧镜像
+      if [ "$CI_COMMIT_TAG" ]; then
+        VERSION=${CI_COMMIT_TAG#v}
+        MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+        MINOR_VERSION=$(echo $VERSION | cut -d. -f1-2)
+        
+        echo "检查并删除旧的同版本镜像..."
+        
+        # 删除完整版本标签
+        if docker manifest inspect $IMAGE_NAME:$VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $IMAGE_NAME:$VERSION"
+          docker buildx imagetools rm $IMAGE_NAME:$VERSION || true
+        fi
+        
+        # 删除主版本标签
+        if docker manifest inspect $IMAGE_NAME:$MAJOR_VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $IMAGE_NAME:$MAJOR_VERSION"
+          docker buildx imagetools rm $IMAGE_NAME:$MAJOR_VERSION || true
+        fi
+        
+        # 删除次版本标签
+        if docker manifest inspect $IMAGE_NAME:$MINOR_VERSION > /dev/null 2>&1; then
+          echo "删除旧镜像: $IMAGE_NAME:$MINOR_VERSION"
+          docker buildx imagetools rm $IMAGE_NAME:$MINOR_VERSION || true
+        fi
+      fi
+      
+      # 保留最新的10个镜像，删除其他镜像
+      echo "保留最新的10个镜像，删除其他镜像..."
+      for tag in $(docker image ls $IMAGE_NAME --format "{{.Tag}}" | tail -n +11); do
+        echo "删除镜像: $IMAGE_NAME:$tag"
         docker rmi $IMAGE_NAME:$tag || true
         docker rmi $CI_REGISTRY_IMAGE:$tag || true
       done
   only:
     - main
     - master
+    - tags
+  when: manual
+
+# 创建Release
+create_release:
+  stage: release
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      if [ "$CI_COMMIT_TAG" ]; then
+        VERSION=${CI_COMMIT_TAG#v}
+        MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+        MINOR_VERSION=$(echo $VERSION | cut -d. -f1-2)
+        
+        echo "创建Release: $VERSION"
+        
+        # 获取上一个标签
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        # 生成变更日志
+        if [ -n "$PREV_TAG" ]; then
+          CHANGELOG="### 自 $PREV_TAG 以来的变更\n\n$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)\n"
+        else
+          CHANGELOG="### 首次发布\n\n$(git log --pretty=format:"- %s (%h)")\n"
+        fi
+        
+        # 创建Release描述
+        RELEASE_BODY="## AnuNeko OpenAI API 兼容服务器 $VERSION\n\n### 镜像信息\n"
+        RELEASE_BODY+="- **完整版本标签**: \`$IMAGE_NAME:$VERSION\`\n"
+        RELEASE_BODY+="- **主版本标签**: \`$IMAGE_NAME:$MAJOR_VERSION\`\n"
+        RELEASE_BODY+="- **次版本标签**: \`$IMAGE_NAME:$MINOR_VERSION\`\n"
+        RELEASE_BODY+="- **最新标签**: \`$IMAGE_NAME:latest\`\n\n"
+        RELEASE_BODY+="### 使用方法\n"
+        RELEASE_BODY+="\`\`\`bash\n"
+        RELEASE_BODY+="# 拉取特定版本\n"
+        RELEASE_BODY+="docker pull $IMAGE_NAME:$VERSION\n\n"
+        RELEASE_BODY+="# 拉取最新版本\n"
+        RELEASE_BODY+="docker pull $IMAGE_NAME:latest\n\n"
+        RELEASE_BODY+="# 运行容器\n"
+        RELEASE_BODY+="docker run -d -p 8000:8000 \\\n"
+        RELEASE_BODY+="  -e ANUNEKO_TOKEN=your_token_here \\\n"
+        RELEASE_BODY+="  $IMAGE_NAME:$VERSION\n"
+        RELEASE_BODY+="\`\`\`\n\n"
+        RELEASE_BODY+="### 变更日志\n$CHANGELOG"
+        RELEASE_BODY+="\n\n### 系统要求\n"
+        RELEASE_BODY+="- Docker 20.10+\n"
+        RELEASE_BODY+="- 内存: 最少 128MB\n"
+        RELEASE_BODY+="- 存储: 最少 100MB"
+        
+        # 使用GitLab API创建Release
+        curl --request POST \
+          --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --header "Content-Type: application/json" \
+          --data "{\"name\":\"Release $VERSION\",\"description\":\"$RELEASE_BODY\",\"tag_name\":\"$CI_COMMIT_TAG\"}" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
+        
+        echo "Release创建成功: $VERSION"
+      else
+        echo "非标签推送，跳过Release创建"
+      fi
+  only:
+    - tags
   when: manual
