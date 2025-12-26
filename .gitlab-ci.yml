@@ -8,7 +8,7 @@ variables:
 
 .extract_version: &extract_version
   - |
-    # 提取版本号
+    # 1. 提取版本
     if [ "$CI_COMMIT_TAG" ]; then
       VERSION=${CI_COMMIT_TAG#v}
     else
@@ -16,12 +16,12 @@ variables:
     fi
     echo "VERSION=$VERSION" > version.env
     
-    # 关键修复：强制将镜像路径转为小写
-    # 使用 bash 的小写转换符 ,, 
+    # 2. 强制将路径转为全小写 (解决 404 的关键)
+    # 例如：ShiDai/AnuNeko -> shidai/anuneko
     LOWER_IMAGE_NAME=$(echo "$CI_REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]')
     echo "IMAGE_NAME=$LOWER_IMAGE_NAME" >> version.env
     
-    echo "目标镜像路径: $LOWER_IMAGE_NAME:$VERSION"
+    echo "确定推送路径: $LOWER_IMAGE_NAME"
 
 build_image:
   stage: build
@@ -29,15 +29,17 @@ build_image:
   services:
     - docker:24.0.5-dind
   before_script:
+    # 使用 CI 自动生成的令牌登录
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
     - *extract_version
     - source version.env
   script:
     - |
-      # 使用从 version.env 加载的 $IMAGE_NAME (已转小写)
+      # 此时 $IMAGE_NAME 已经是小写了
+      echo "步骤 1: 构建镜像"
       docker build -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest -f ./docker/Dockerfile .
       
-      echo "执行推送至: $IMAGE_NAME"
+      echo "步骤 2: 推送镜像"
       docker push $IMAGE_NAME:$VERSION
       docker push $IMAGE_NAME:latest
   artifacts:
@@ -59,15 +61,17 @@ create_release:
   script:
     - |
       source version.env
-      if [ -z "$CI_COMMIT_TAG" ]; then exit 0; fi
+      if [ -z "$CI_COMMIT_TAG" ]; then echo "非标签，不创建 Release"; exit 0; fi
       
+      # 生成简易变更日志
       PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
       [ -n "$PREV_TAG" ] && CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD) || CHANGELOG="Initial release"
 
+      # 构造 JSON
       JSON_DATA=$(jq -n \
         --arg n "Release $VERSION" \
         --arg t "$CI_COMMIT_TAG" \
-        --arg d "### Docker Pull命令:\n\`docker pull $IMAGE_NAME:$VERSION\`\n\n### 变更日志:\n$CHANGELOG" \
+        --arg d "### 快速下载\n\`docker pull $IMAGE_NAME:$VERSION\`\n\n### 变更日志\n$CHANGELOG" \
         '{name: $n, tag_name: $t, description: $d}')
 
       curl --request POST \
