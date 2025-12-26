@@ -1,0 +1,176 @@
+name: CI/CD - Build, Push and Mirror
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 任务 1: 同步代码到 GitLab (由于轻量，优先执行)
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Add GitLab remote
+        env:
+          GITLAB_URL: ${{ secrets.GITLAB_URL }}
+          GITLAB_REPO: ${{ secrets.GITLAB_REPO }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_URL" ] || [ -z "$GITLAB_REPO" ] || [ -z "$GITLAB_TOKEN" ]; then
+            echo "错误: 请设置 GITLAB_URL, GITLAB_REPO 和 GITLAB_TOKEN secrets"
+            exit 1
+          fi
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL}/${GITLAB_REPO}.git"
+          git ls-remote gitlab > /dev/null
+
+      - name: Push to GitLab
+        run: |
+          CURRENT_BRANCH=${GITHUB_REF#refs/heads/}
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            CURRENT_BRANCH="${{ github.head_ref }}"
+          fi
+          echo "正在推送分支: $CURRENT_BRANCH"
+          git push gitlab $CURRENT_BRANCH
+          if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
+            echo "推送所有标签到 GitLab"
+            git push gitlab --tags
+          fi
+
+      - name: Create GitLab MR
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' && github.event_name == 'push'
+        env:
+          GITLAB_URL: ${{ secrets.GITLAB_URL }}
+          GITLAB_REPO: ${{ secrets.GITLAB_REPO }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          CURRENT_BRANCH=${GITHUB_REF#refs/heads/}
+          PROJECT_ID_ENC=$(echo ${GITLAB_REPO} | sed 's/\//%2F/g')
+          MR_EXISTS=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            "${GITLAB_URL}/api/v4/projects/${PROJECT_ID_ENC}/merge_requests?source_branch=${CURRENT_BRANCH}&state=opened" | jq '. | length')
+          
+          if [ "$MR_EXISTS" == "0" ]; then
+            echo "创建 GitLab 合并请求..."
+            curl --request POST \
+              --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data "{
+                \"source_branch\": \"${CURRENT_BRANCH}\",
+                \"target_branch\": \"main\",
+                \"title\": \"Mirror: ${CURRENT_BRANCH}\",
+                \"description\": \"自动从 GitHub 镜像的分支: ${CURRENT_BRANCH}\"
+              }" "${GITLAB_URL}/api/v4/projects/${PROJECT_ID_ENC}/merge_requests"
+          fi
+
+  # 任务 2: 构建 Docker 镜像并生成 SBOM
+  build:
+    runs-on: ubuntu-latest
+    # 只有推送分支或标签时才执行构建（PR 仅同步代码，减少流量消耗）
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=latest
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  # 任务 3: 发布 GitHub Release (仅限 Tag)
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: ./
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ needs.build.outputs.version }}
+          body: |
+            ## AnuNeko OpenAI API 服务器 ${{ needs.build.outputs.version }}
+            - 镜像: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}`
+            - 摘要: `${{ needs.build.outputs.image_digest }}`
+          files: sbom.spdx.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

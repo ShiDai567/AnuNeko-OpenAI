@@ -5,48 +5,36 @@ stages:
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
-  # 自动获取镜像地址，如 repo.elsworld.cn:8443/group/project
-  # 无论你怎么改仓库名，这里都会自动同步
+  # 自动适配任何仓库名
   IMAGE_NAME: $CI_REGISTRY_IMAGE
 
-# 提取版本信息的参考块
 .extract_version: &extract_version
   - |
-    # 初始化环境变量文件
     if [ "$CI_COMMIT_TAG" ]; then
-      # 提取版本号 (v1.0 -> 1.0)
       VERSION=${CI_COMMIT_TAG#v}
-      echo "当前版本为 Tag: $VERSION"
     else
-      # 非标签推送，使用短哈希
       VERSION=$CI_COMMIT_SHORT_SHA
-      echo "当前版本为 Commit: $VERSION"
     fi
     echo "VERSION=$VERSION" > version.env
+    echo "目标镜像路径: $IMAGE_NAME:$VERSION"
 
-# 阶段 1: 构建并推送镜像
 build_image:
   stage: build
   image: docker:24.0.5
   services:
     - docker:24.0.5-dind
   before_script:
-    # 使用 GitLab 内置变量登录，无需手动配置账号密码
+    # 自动登录，确保使用 CI 提供的临时权限
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
     - *extract_version
     - source version.env
   script:
     - |
-      echo "正在构建镜像: $IMAGE_NAME"
-      
-      # 步骤 1: 构建新镜像 (同时打上版本号标签和 latest 标签)
+      # 构建镜像，同时标记两个标签
       docker build -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest -f ./docker/Dockerfile .
-
-      # 步骤 2: 推送镜像到 Registry
-      echo "正在推送 $VERSION 到仓库..."
-      docker push $IMAGE_NAME:$VERSION
       
-      echo "正在推送 latest 到仓库..."
+      # 分别推送
+      docker push $IMAGE_NAME:$VERSION
       docker push $IMAGE_NAME:latest
   artifacts:
     reports:
@@ -56,7 +44,6 @@ build_image:
     - master
     - tags
 
-# 阶段 2: 创建 Release (仅限 Tag 推送)
 create_release:
   stage: release
   image: alpine:latest
@@ -67,30 +54,23 @@ create_release:
     - apk add --no-cache curl jq git
   script:
     - |
-      if [ -z "$CI_COMMIT_TAG" ]; then echo "非标签推送，跳过 Release 创建"; exit 0; fi
+      if [ -z "$CI_COMMIT_TAG" ]; then exit 0; fi
       
-      echo "正在为 $VERSION 创建 GitLab Release..."
-      
-      # 获取简单的变更日志 (当前 Tag 到上一个 Tag 之间的提交)
+      # 自动获取 CHANGELOG
       PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-      if [ -n "$PREV_TAG" ]; then
-        CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
-      else
-        CHANGELOG="首次发布"
-      fi
+      [ -n "$PREV_TAG" ] && CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD) || CHANGELOG="Initial release"
 
-      # 使用 jq 安全地构造 JSON 内容
-      RELEASE_DATA=$(jq -n \
-        --arg name "Release $VERSION" \
-        --arg tag "$CI_COMMIT_TAG" \
-        --arg desc "## 版本 $VERSION\n\n### 镜像信息\n- \`docker pull $IMAGE_NAME:$VERSION\`\n- \`docker pull $IMAGE_NAME:latest\`\n\n### 变更日志\n$CHANGELOG" \
-        '{name: $name, tag_name: $tag, description: $desc}')
+      # 安全构造 JSON
+      JSON_DATA=$(jq -n \
+        --arg n "Release $VERSION" \
+        --arg t "$CI_COMMIT_TAG" \
+        --arg d "### Docker Pull命令:\n\`docker pull $IMAGE_NAME:$VERSION\`\n\n### 变更日志:\n$CHANGELOG" \
+        '{name: $n, tag_name: $t, description: $d}')
 
-      # 发送 API 请求创建 Release
       curl --request POST \
         --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
         --header "Content-Type: application/json" \
-        --data "$RELEASE_DATA" \
+        --data "$JSON_DATA" \
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
   only:
     - tags
