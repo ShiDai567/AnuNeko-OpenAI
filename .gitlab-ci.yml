@@ -5,18 +5,23 @@ stages:
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: "/certs"
-  # 自动适配任何仓库名
-  IMAGE_NAME: $CI_REGISTRY_IMAGE
 
 .extract_version: &extract_version
   - |
+    # 提取版本号
     if [ "$CI_COMMIT_TAG" ]; then
       VERSION=${CI_COMMIT_TAG#v}
     else
       VERSION=$CI_COMMIT_SHORT_SHA
     fi
     echo "VERSION=$VERSION" > version.env
-    echo "目标镜像路径: $IMAGE_NAME:$VERSION"
+    
+    # 关键修复：强制将镜像路径转为小写
+    # 使用 bash 的小写转换符 ,, 
+    LOWER_IMAGE_NAME=$(echo "$CI_REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]')
+    echo "IMAGE_NAME=$LOWER_IMAGE_NAME" >> version.env
+    
+    echo "目标镜像路径: $LOWER_IMAGE_NAME:$VERSION"
 
 build_image:
   stage: build
@@ -24,16 +29,15 @@ build_image:
   services:
     - docker:24.0.5-dind
   before_script:
-    # 自动登录，确保使用 CI 提供的临时权限
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
     - *extract_version
     - source version.env
   script:
     - |
-      # 构建镜像，同时标记两个标签
+      # 使用从 version.env 加载的 $IMAGE_NAME (已转小写)
       docker build -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest -f ./docker/Dockerfile .
       
-      # 分别推送
+      echo "执行推送至: $IMAGE_NAME"
       docker push $IMAGE_NAME:$VERSION
       docker push $IMAGE_NAME:latest
   artifacts:
@@ -54,13 +58,12 @@ create_release:
     - apk add --no-cache curl jq git
   script:
     - |
+      source version.env
       if [ -z "$CI_COMMIT_TAG" ]; then exit 0; fi
       
-      # 自动获取 CHANGELOG
       PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
       [ -n "$PREV_TAG" ] && CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD) || CHANGELOG="Initial release"
 
-      # 安全构造 JSON
       JSON_DATA=$(jq -n \
         --arg n "Release $VERSION" \
         --arg t "$CI_COMMIT_TAG" \

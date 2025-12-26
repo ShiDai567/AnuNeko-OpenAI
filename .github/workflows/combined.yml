@@ -11,10 +11,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # 这里保留原始引用，但在 Job 中会生成小写副本供 Docker/Syft 使用
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # 任务 1: 同步代码到 GitLab (由于轻量，优先执行)
+  # 任务 1: 同步代码到 GitLab
   mirror:
     runs-on: ubuntu-latest
     steps:
@@ -48,7 +49,7 @@ jobs:
             CURRENT_BRANCH="${{ github.head_ref }}"
           fi
           echo "正在推送分支: $CURRENT_BRANCH"
-          git push gitlab $CURRENT_BRANCH
+          git push gitlab "$CURRENT_BRANCH"
           if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
             echo "推送所有标签到 GitLab"
             git push gitlab --tags
@@ -62,7 +63,7 @@ jobs:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           CURRENT_BRANCH=${GITHUB_REF#refs/heads/}
-          PROJECT_ID_ENC=$(echo ${GITLAB_REPO} | sed 's/\//%2F/g')
+          PROJECT_ID_ENC=$(echo "${GITLAB_REPO}" | sed 's/\//%2F/g')
           MR_EXISTS=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
             "${GITLAB_URL}/api/v4/projects/${PROJECT_ID_ENC}/merge_requests?source_branch=${CURRENT_BRANCH}&state=opened" | jq '. | length')
           
@@ -82,7 +83,6 @@ jobs:
   # 任务 2: 构建 Docker 镜像并生成 SBOM
   build:
     runs-on: ubuntu-latest
-    # 只有推送分支或标签时才执行构建（PR 仅同步代码，减少流量消耗）
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -90,11 +90,17 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       image_digest: ${{ steps.build.outputs.digest }}
+      image_name_lower: ${{ env.IMAGE_NAME_LOWER }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # 核心修复步骤：将镜像名称转为全小写，存入环境变量
+      - name: Lowercase Registry Image Name
+        run: |
+          echo "IMAGE_NAME_LOWER=${GITHUB_REPOSITORY@L}" >> $GITHUB_ENV
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -117,7 +123,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # 使用小写化的镜像名称
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -139,7 +146,8 @@ jobs:
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          # 使用小写名称 + Digest，彻底解决 Syft 报错
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: sbom.spdx.json
 
@@ -149,7 +157,7 @@ jobs:
           name: sbom
           path: sbom.spdx.json
 
-  # 任务 3: 发布 GitHub Release (仅限 Tag)
+  # 任务 3: 发布 GitHub Release
   release:
     runs-on: ubuntu-latest
     needs: build
@@ -169,8 +177,12 @@ jobs:
           name: Release ${{ needs.build.outputs.version }}
           body: |
             ## AnuNeko OpenAI API 服务器 ${{ needs.build.outputs.version }}
-            - 镜像: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}`
-            - 摘要: `${{ needs.build.outputs.image_digest }}`
+            
+            ### 镜像信息
+            - 镜像地址: `${{ env.REGISTRY }}/${{ needs.build.outputs.image_name_lower }}:${{ needs.build.outputs.version }}`
+            - 摘要 (Digest): `${{ needs.build.outputs.image_digest }}`
+            
+            已附带 SBOM 安全清单文件。
           files: sbom.spdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
